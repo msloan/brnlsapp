@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Agent Status Dashboard</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f4f7f6; color: #333; }
+        h1, h2 { color: #2c3e50; border-bottom: 1px solid #bdc3c7; padding-bottom: 5px;}
+        #agents-list { list-style: none; padding: 0; }
+        .agent-item {
+            background-color: #fff;
+            border: 1px solid #dfe4ea;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            transition: background-color 0.3s ease;
+        }
+        .agent-item.state-running { border-left: 5px solid #2ecc71; } /* Green */
+        .agent-item.state-paused { border-left: 5px solid #f39c12; } /* Orange */
+        .agent-info { flex-grow: 1; margin-right: 15px; }
+        .agent-id { font-weight: bold; font-size: 0.9em; color: #555; word-break: break-all; }
+        .agent-status {
+            font-weight: bold;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 0.85em;
+            text-transform: uppercase;
+        }
+        .status-running { background-color: #2ecc71; color: white; }
+        .status-paused { background-color: #f39c12; color: white; }
+        .agent-actions button {
+            padding: 8px 12px;
+            font-size: 0.9em;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            margin-left: 5px;
+            transition: background-color 0.2s ease;
+        }
+        .btn-pause { background-color: #e67e22; color: white; }
+        .btn-pause:hover { background-color: #d35400; }
+        .btn-resume { background-color: #27ae60; color: white; }
+        .btn-resume:hover { background-color: #229954; }
+        #add-agent-btn {
+            padding: 10px 15px;
+            font-size: 1em;
+            cursor: pointer;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            transition: background-color 0.2s ease;
+        }
+        #add-agent-btn:hover { background-color: #2980b9; }
+        #log-area { margin-top: 20px; border-top: 1px solid #bdc3c7; padding-top: 15px; }
+        #log { list-style: none; padding: 0; font-size: 0.8em; max-height: 150px; overflow-y: auto; background-color: #ecf0f1; padding: 10px; border-radius: 4px;}
+        #log li { margin-bottom: 5px; color: #7f8c8d; }
+        #log li.error { color: #c0392b; font-weight: bold;}
+        #log li.info { color: #2980b9; }
+        #log li.success { color: #27ae60; }
+    </style>
+</head>
+<body>
+    <h1>Agent Status Dashboard</h1>
+    <button id="add-agent-btn">Add New Agent</button>
+    
+    <h2>Agents:</h2>
+    <ul id="agents-list"></ul>
+
+    <div id="log-area">
+        <h2>Log:</h2>
+        <ul id="log"></ul>
+    </div>
+
+    <script>
+        const agentsListElement = document.getElementById('agents-list');
+        const logElement = document.getElementById('log');
+        const addAgentButton = document.getElementById('add-agent-btn');
+        let eventSource;
+
+        // --- Logging --- 
+        const log = (text, type = 'message') => {
+            const item = document.createElement('li');
+            item.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+            item.classList.add(type); // Add class for styling (e.g., 'error', 'info', 'success')
+            logElement.appendChild(item);
+            logElement.scrollTop = logElement.scrollHeight;
+        };
+
+        // --- API Calls --- 
+        async function fetchAgents() {
+            log('Fetching initial agent list...', 'info');
+            try {
+                const response = await fetch('/agents');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const agents = await response.json();
+                agentsListElement.innerHTML = ''; // Clear existing list
+                agents.forEach(renderAgent);
+                log(`Fetched ${agents.length} agents.`, 'success');
+            } catch (error) {
+                log(`Error fetching agents: ${error}`, 'error');
+            }
+        }
+
+        async function addAgent() {
+            log('Adding new agent...', 'info');
+            try {
+                const response = await fetch('/agents', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    // Body can be empty or contain { AgentId: null } depending on backend
+                    // Our backend generates ID if not provided
+                    body: JSON.stringify({ AgentId: null })
+                });
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const newAgent = await response.json(); // Backend returns the created agent
+                // SSE update will handle rendering, but we log success here
+                log(`Agent add request successful. ID: ${newAgent.AgentId}`, 'success'); 
+            } catch (error) {
+                log(`Error adding agent: ${error}`, 'error');
+            }
+        }
+
+        async function updateAgentState(agentId, newState) {
+            log(`Requesting state change for ${agentId} to ${newState}...`, 'info');
+            try {
+                const response = await fetch(`/agents/${agentId}/state`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ state: newState })
+                });
+                 if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                // SSE update will handle UI changes, log success
+                log(`State change request for ${agentId} to ${newState} successful.`, 'success');
+            } catch (error) {
+                log(`Error updating agent ${agentId} state: ${error}`, 'error');
+            }
+        }
+
+        // --- UI Rendering --- 
+        function renderAgent(agent) {
+            const agentId = agent.AgentId;
+            const state = agent.State;
+
+            let item = document.getElementById(`agent-${agentId}`);
+            if (!item) {
+                item = document.createElement('li');
+                item.id = `agent-${agentId}`;
+                item.classList.add('agent-item');
+                agentsListElement.appendChild(item);
+            }
+
+            item.className = `agent-item state-${state}`; // Update class for styling
+
+            const isPaused = state === 'paused';
+            const buttonText = isPaused ? 'Resume' : 'Pause';
+            const nextState = isPaused ? 'running' : 'paused';
+            const buttonClass = isPaused ? 'btn-resume' : 'btn-pause';
+
+            item.innerHTML = `
+                <div class="agent-info">
+                    <span class="agent-id">ID: ${agentId}</span>
+                    <span class="agent-status status-${state}">${state}</span>
+                </div>
+                <div class="agent-actions">
+                    <button class="${buttonClass}" data-agent-id="${agentId}" data-next-state="${nextState}">
+                        ${buttonText}
+                    </button>
+                </div>
+            `;
+
+            // Re-attach event listener to the new button
+            const button = item.querySelector('button');
+            if (button) {
+                button.addEventListener('click', handleStateChangeClick);
+            }
+        }
+
+        function handleStateChangeClick(event) {
+            const button = event.target;
+            const agentId = button.dataset.agentId;
+            const nextState = button.dataset.nextState;
+            if (agentId && nextState) {
+                updateAgentState(agentId, nextState);
+            }
+        }
+
+        // --- SSE Connection --- 
+        function connectSSE() {
+            log('Connecting to SSE /events...', 'info');
+            if (eventSource) {
+                eventSource.close(); // Close existing connection if any
+            }
+            eventSource = new EventSource("/events");
+
+            eventSource.addEventListener("agent_update", e => {
+                try {
+                    const agentData = JSON.parse(e.data);
+                    log(`SSE Update: Agent ${agentData.AgentId} is now ${agentData.State}`);
+                    renderAgent(agentData); // Update or add agent in the UI
+                } catch (err) {
+                    log('Failed to parse SSE data: ' + e.data, 'error');
+                }
+            });
+
+            eventSource.onopen = () => {
+                log('SSE Connection established.', 'success');
+                // Fetch initial state *after* connection is open to avoid race conditions
+                fetchAgents();
+            };
+
+            eventSource.onerror = (err) => {
+                log('SSE Connection error or closed. Will attempt to reconnect automatically.', 'error');
+                // EventSource handles reconnection automatically. Log for info.
+                // Consider adding custom backoff/retry logic here if needed.
+            };
+        }
+
+        // --- Initial Setup --- 
+        addAgentButton.addEventListener('click', addAgent);
+        connectSSE(); // Start the connection
+
+    </script>
+</body>
+</html>
